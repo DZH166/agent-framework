@@ -455,7 +455,13 @@ class TestApprovalFlow:
         assert "context-second" not in repr(checkpoints)
         assert "context-first" not in repr(approval.data)
         assert "context-second" not in repr(approval.data)
-        checkpoint = max(checkpoints, key=lambda item: item.timestamp)
+        # Several superstep checkpoints can share a timestamp (they are taken within one
+        # host clock tick, in particular on Windows), and a plain ``max`` over the ISO
+        # timestamp strings then returns the first-saved checkpoint in storage order, so
+        # the restore starts from a stale state. Use the storage's lineage-aware
+        # selection, which resolves timestamp ties through ``previous_checkpoint_id``.
+        checkpoint = await storage.get_latest(workflow_name=workflow.name)
+        assert checkpoint is not None
         assert checkpoint.state[_HEADER_BINDING_KEY] not in repr(approval.data)
         if restore:
             workflow = build()
