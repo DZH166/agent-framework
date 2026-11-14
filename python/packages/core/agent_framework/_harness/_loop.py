@@ -613,9 +613,13 @@ class AgentLoopMiddleware(AgentMiddleware):
                     # Reset the session to the pre-loop baseline so the next run starts fresh; only the
                     # progress log (injected by _resolve_next_message) carries continuity forward.
                     self._restore_session(context.session, snapshot)
-                next_messages = await self._resolve_next_message(loop_kwargs, messages_used, original_messages)
+                next_messages, injected_messages = await self._resolve_next_message(
+                    loop_kwargs, messages_used, original_messages
+                )
                 context.messages = next_messages
-                aggregated.extend(next_messages)
+                # Surface only what the loop injects: replayed input (the caller's own messages and
+                # any additional_instructions system message) is sent to the agent, not echoed back.
+                aggregated.extend(injected_messages)
         finally:
             context.options.pop(_LOOP_ITERATION_TOKEN_KEY, None)
 
@@ -716,12 +720,14 @@ class AgentLoopMiddleware(AgentMiddleware):
                         # response was already awaited above, so the service-side conversation id has
                         # been propagated and is safe to discard here.
                         self._restore_session(context.session, snapshot)
-                    next_messages = await self._resolve_next_message(loop_kwargs, messages_used, original_messages)
+                    next_messages, injected_messages = await self._resolve_next_message(
+                        loop_kwargs, messages_used, original_messages
+                    )
                     context.messages = next_messages
                     # Surface the injected "nudge" messages in the stream so consumers see the user
                     # turns that drive each subsequent iteration (the equivalent of the aggregated
-                    # transcript that non-streaming runs return).
-                    for message in next_messages:
+                    # transcript that non-streaming runs return). Replayed input stays out of the stream.
+                    for message in injected_messages:
                         yield self._message_to_update(message)
             finally:
                 context.options.pop(_LOOP_ITERATION_TOKEN_KEY, None)
@@ -837,7 +843,14 @@ class AgentLoopMiddleware(AgentMiddleware):
         loop_kwargs: dict[str, Any],
         messages_used: list[Message],
         original_messages: list[Message],
-    ) -> list[Message]:
+    ) -> tuple[list[Message], list[Message]]:
+        """Resolve the next iteration's input and the messages the loop itself injects.
+
+        Returns ``(next_input, injected)``. ``next_input`` is everything the agent must see, which
+        includes replayed caller input in fresh-context mode; ``injected`` holds only the messages
+        this loop contributes (the progress log and the ``next_message`` messages). Callers surface
+        ``injected`` to the caller and never echo replayed input back into the run result.
+        """
         # Compute the base next input. A ``next_message`` callable returning None requests a verbatim
         # reuse of the previous messages (no progress injection); in fresh-context mode that escape
         # hatch does not apply, so fall back to the default nudge instead.
@@ -847,7 +860,8 @@ class AgentLoopMiddleware(AgentMiddleware):
             next_input = await _maybe_await(self.next_message(**loop_kwargs))
             if next_input is None:
                 if not self.fresh_context:
-                    return list(messages_used)
+                    # Verbatim reuse injects nothing, so nothing is surfaced between iterations.
+                    return list(messages_used), []
                 next_msgs = normalize_messages(DEFAULT_NEXT_MESSAGE)
             else:
                 next_msgs = normalize_messages(next_input)
@@ -862,15 +876,13 @@ class AgentLoopMiddleware(AgentMiddleware):
             progress_msg = self._render_progress(entries)
 
         if self.fresh_context:
-            result = list(original_messages)
-            if progress_msg is not None:
-                result.append(progress_msg)
-            result.extend(next_msgs)
-            return result
+            injected = [progress_msg, *next_msgs] if progress_msg is not None else list(next_msgs)
+            return [*original_messages, *injected], injected
 
         if progress_msg is not None:
-            return [progress_msg, *next_msgs]
-        return list(next_msgs)
+            injected = [progress_msg, *next_msgs]
+            return list(injected), list(injected)
+        return list(next_msgs), list(next_msgs)
 
 
 def _running_background_tasks(session: Any, agent: Any) -> list[Any]:

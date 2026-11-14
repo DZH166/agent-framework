@@ -325,6 +325,62 @@ async def test_non_streaming_returns_aggregated_transcript_by_default() -> None:
     assert roles == ["assistant", "user", "assistant"]
 
 
+async def test_aggregated_transcript_excludes_replayed_input() -> None:
+    client = RecordingChatClient(texts=["draft 1", "draft 2", "draft 3"])
+    agent = Agent(
+        client=client,
+        middleware=[
+            AgentLoopMiddleware(
+                always_continue,
+                max_iterations=3,
+                fresh_context=True,
+                additional_instructions="RUBRIC: cite a source.",
+            )
+        ],
+    )
+
+    response = await agent.run("Write the report")
+
+    # Only the loop's own hook messages are surfaced: the replayed caller input and the
+    # additional_instructions system message are sent to the agent but never echoed back.
+    assert [m.role for m in response.messages] == [
+        "assistant",
+        "user",
+        "user",
+        "assistant",
+        "user",
+        "user",
+        "assistant",
+    ]
+    surfaced = [m.text or "" for m in response.messages if m.role != "assistant"]
+    assert all("Write the report" not in text for text in surfaced)
+    assert all("RUBRIC" not in text for text in surfaced)
+    # Each iteration's answer appears exactly once, in order.
+    assistant_texts = [m.text for m in response.messages if m.role == "assistant"]
+    assert assistant_texts == ["draft 1", "draft 2", "draft 3"]
+
+
+async def test_next_message_returning_none_surfaces_nothing() -> None:
+    client = RecordingChatClient(texts=["draft 1", "draft 2", "draft 3"])
+    agent = Agent(
+        client=client,
+        middleware=[
+            AgentLoopMiddleware(
+                always_continue,
+                max_iterations=3,
+                next_message=lambda **kwargs: None,
+                inject_progress=False,
+            )
+        ],
+    )
+
+    response = await agent.run("only input")
+
+    # A verbatim reuse injects no message, so nothing is surfaced between iterations.
+    assert [m.role for m in response.messages] == ["assistant", "assistant", "assistant"]
+    assert "only input" not in response.text
+
+
 async def test_non_streaming_return_final_only_returns_last_response() -> None:
     client = RecordingChatClient(texts=["first answer", "second answer"])
     agent = Agent(
@@ -747,13 +803,14 @@ async def test_resolve_next_message_injects_full_log_without_session() -> None:
         "agent": None,
     }
 
-    result = await mw._resolve_next_message(
+    next_input, injected = await mw._resolve_next_message(
         loop_kwargs,
         messages_used=[Message(role="user", contents=["x"])],
         original_messages=[Message(role="user", contents=["orig"])],
     )
 
-    progress_text = result[0].text
+    assert next_input == injected
+    progress_text = injected[0].text
     assert "e1" in progress_text
     assert "e2" in progress_text
 
@@ -770,13 +827,14 @@ async def test_resolve_next_message_injects_latest_entry_with_session() -> None:
         "agent": None,
     }
 
-    result = await mw._resolve_next_message(
+    next_input, injected = await mw._resolve_next_message(
         loop_kwargs,
         messages_used=[Message(role="user", contents=["x"])],
         original_messages=[Message(role="user", contents=["orig"])],
     )
 
-    progress_text = result[0].text
+    assert next_input == injected
+    progress_text = injected[0].text
     assert "e2" in progress_text
     assert "e1" not in progress_text
 
@@ -1329,6 +1387,33 @@ async def test_streaming_injects_nudge_messages_as_user_updates() -> None:
 
     # The nudge that drives the second iteration is surfaced as a user update in the stream.
     user_texts = [u.text for u in updates if u.role == "user"]
+    assert any(DEFAULT_NEXT_MESSAGE in text for text in user_texts)
+
+
+async def test_streaming_updates_exclude_replayed_input() -> None:
+    client = RecordingChatClient(texts=["draft 1", "draft 2"])
+    agent = Agent(
+        client=client,
+        middleware=[
+            AgentLoopMiddleware(
+                always_continue,
+                max_iterations=2,
+                fresh_context=True,
+                additional_instructions="RUBRIC: cite a source.",
+            )
+        ],
+    )
+
+    stream = agent.run("Write the report", stream=True)
+    updates = [update async for update in stream]
+    await stream.get_final_response()
+
+    roles = [u.role for u in updates]
+    assert "system" not in roles
+    user_texts = [u.text or "" for u in updates if u.role == "user"]
+    assert all("Write the report" not in text for text in user_texts)
+    assert all("RUBRIC" not in text for text in user_texts)
+    # The injected nudge is still surfaced so consumers see what drives each iteration.
     assert any(DEFAULT_NEXT_MESSAGE in text for text in user_texts)
 
 
