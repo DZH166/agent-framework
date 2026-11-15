@@ -3157,15 +3157,15 @@ class RawOpenAIChatClient(
             _OPENAI_LOCAL_SHELL_CALL_ITEM_ID_NAMESPACE_KEY,
             OPENAI_LOCAL_SHELL_CALL_ITEM_ID_KEY,
         )
-        action: dict[str, Any] = {"commands": list(content.commands or [])}
-        if content.timeout_ms is not None:
-            action["timeout_ms"] = content.timeout_ms
-        payload: dict[str, Any] = {"type": "shell_call", "call_id": content.call_id, "action": action}
+        payload: dict[str, Any] = {
+            "type": "shell_call",
+            "call_id": content.call_id,
+            "status": content.status or "completed",
+            "action": {"commands": list(content.commands or [])},
+        }
         if isinstance(item_id, str) and item_id:
             payload["id"] = item_id
             payload["environment"] = {"type": "local"}
-        if content.status:
-            payload["status"] = content.status
         return payload
 
     @staticmethod
