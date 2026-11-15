@@ -2844,6 +2844,22 @@ class RawOpenAIChatClient(
                         # emits on replay. A call that ran no commands is equivalent to a
                         # ``shell_call`` with an empty action, so record that shape and pair it with
                         # the terminal output below instead of leaving an orphaned shell call.
+                        # The item id also goes into the serialized metadata, because
+                        # ``raw_representation`` does not survive ``Content.to_dict()``.
+                        additional_properties=(
+                            _openai_additional_properties(
+                                {
+                                    _OPENAI_SHELL_OUTPUT_TYPE_NAMESPACE_KEY: OPENAI_SHELL_OUTPUT_TYPE_SHELL_CALL,
+                                    _OPENAI_LOCAL_SHELL_CALL_ITEM_ID_NAMESPACE_KEY: local_call_item_id,
+                                },
+                                legacy={
+                                    OPENAI_SHELL_OUTPUT_TYPE_KEY: OPENAI_SHELL_OUTPUT_TYPE_SHELL_CALL,
+                                    OPENAI_LOCAL_SHELL_CALL_ITEM_ID_KEY: local_call_item_id,
+                                },
+                            )
+                            if empty_local_call
+                            else None
+                        ),
                         raw_representation=(
                             {
                                 "id": local_call_item_id,
@@ -3104,6 +3120,8 @@ class RawOpenAIChatClient(
                 output["max_output_length"] = content.max_output_length
             return output
         payload = cls._serialize_provider_payload(content.raw_representation)
+        if payload is None:
+            payload = cls._rebuild_shell_call_payload(content, expected_type)
         if isinstance(payload, Mapping):
             typed_payload = cast("Mapping[str, Any]", payload)
             raw_call_id = typed_payload.get("call_id")
@@ -3123,6 +3141,32 @@ class RawOpenAIChatClient(
             f"Stateless replay cannot reconstruct {expected_type} for shell call {content.call_id!r}. "
             "Use service-side continuation or preserve the original provider response item."
         )
+
+    @classmethod
+    def _rebuild_shell_call_payload(cls, content: Content, expected_type: str) -> dict[str, Any] | None:
+        """Rebuild a shell call payload from the fields ``Content.to_dict()`` keeps.
+
+        ``raw_representation`` is dropped on serialization, so a call restored from a checkpoint
+        only carries its typed fields. An empty local shell call has everything needed to rebuild
+        the wire payload, which is what keeps a restored conversation replayable.
+        """
+        if expected_type != "shell_call" or not content.call_id:
+            return None
+        item_id = _get_openai_metadata(
+            content.additional_properties,
+            _OPENAI_LOCAL_SHELL_CALL_ITEM_ID_NAMESPACE_KEY,
+            OPENAI_LOCAL_SHELL_CALL_ITEM_ID_KEY,
+        )
+        action: dict[str, Any] = {"commands": list(content.commands or [])}
+        if content.timeout_ms is not None:
+            action["timeout_ms"] = content.timeout_ms
+        payload: dict[str, Any] = {"type": "shell_call", "call_id": content.call_id, "action": action}
+        if isinstance(item_id, str) and item_id:
+            payload["id"] = item_id
+            payload["environment"] = {"type": "local"}
+        if content.status:
+            payload["status"] = content.status
+        return payload
 
     @staticmethod
     def _serialize_provider_payload(value: Any) -> Any:

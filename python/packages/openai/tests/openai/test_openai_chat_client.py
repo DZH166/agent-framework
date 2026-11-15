@@ -2998,8 +2998,9 @@ def test_empty_local_shell_call_item_replays_with_empty_output(round_trip: bool,
     assert [content.type for content in contents] == ["shell_tool_call", "shell_tool_result"]
     message = Message("assistant", contents)
     if round_trip:
-        restored_result = Message.from_json(Message("assistant", [contents[1]]).to_json()).contents[0]
-        message = Message("assistant", [contents[0], restored_result])
+        # Round-trip the whole message, not only the result: ``Content.to_dict()`` drops
+        # ``raw_representation``, so this is the shape a persisted conversation takes.
+        message = Message.from_json(message.to_json())
     replay = client._prepare_messages_for_openai(
         [message, Message("user", ["Continue"])],
         request_uses_service_side_storage=service_storage,
